@@ -101,11 +101,12 @@ def extract_curves_from_raw(data_bytes):
     return curves
 
 # ============================================================
-# دالة قراءة الملف بكل الطرق الممكنة (تم إصلاح dlisio و lasio)
+# دالة قراءة الملف بكل الطرق الممكنة
 # ============================================================
 def read_file_ultimate(file_bytes, file_name):
     errors = []
     
+    # المحاولة 1: dlisio
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.lis') as tmp:
@@ -119,7 +120,13 @@ def read_file_ultimate(file_bytes, file_name):
             return parsed_files, "DLIS/LIS (dlisio)", None
     except Exception as e:
         errors.append(f"DLISIO: {e}")
+    finally:
+        try:
+            if tmp_path and Path(tmp_path).exists():
+                Path(tmp_path).unlink()
+        except: pass
     
+    # المحاولة 2: LAS
     try:
         las_text = file_bytes.decode('ascii', errors='ignore')
         las = lasio.read(io.StringIO(las_text))
@@ -146,6 +153,7 @@ def read_file_ultimate(file_bytes, file_name):
     except Exception as e:
         errors.append(f"LAS: {e}")
     
+    # المحاولة 3: القراءة الخام
     try:
         raw_curves = extract_curves_from_raw(file_bytes)
         if raw_curves:
@@ -182,24 +190,24 @@ def get_all_curves(file_obj):
         if hasattr(file_obj, 'frames'):
             for frame in file_obj.frames:
                 try:
-                    frame_data = frame.curves()
-                    if isinstance(frame_data, np.ndarray) and frame_data.dtype.names:
-                        for name in frame_data.dtype.names:
-                            curves[name] = np.array(frame_data[name])
-                    else:
-                        for curve in frame.curves():
-                            name = getattr(curve, 'name', f'CURVE_{len(curves)}')
-                            data = curve.curves()
-                            if data is not None and len(data) > 0:
-                                curves[name] = np.array(data)
+                    for curve in frame.curves():
+                        name = getattr(curve, 'name', f'CURVE_{len(curves)}')
+                        data = curve.curves()
+                        if data is not None and len(data) > 0:
+                            curves[name] = np.array(data)
                 except:
                     continue
                     
         if not curves and hasattr(file_obj, 'curves'):
             curve_list = file_obj.curves() if callable(file_obj.curves) else file_obj.curves
-            if isinstance(curve_list, np.ndarray) and curve_list.dtype.names:
-                for name in curve_list.dtype.names:
-                    curves[name] = np.array(curve_list[name])
+            if isinstance(curve_list, (list, tuple)):
+                for curve in curve_list:
+                    try:
+                        name = getattr(curve, 'name', f'CURVE_{len(curves)}')
+                        data = curve.curves() if hasattr(curve, 'curves') else curve
+                        if data is not None and len(data) > 0:
+                            curves[name] = np.array(data)
+                    except: pass
     except: pass
     
     return curves
@@ -238,49 +246,89 @@ def read_log_file(file_bytes, file_name):
         return None, str(e)
 
 # ============================================================
-# دالة التحويل إلى LAS مع الإصلاح الجديد لـ lasio
+# دالة لتوحيد أطوال المنحنيات (المفتاح السحري)
+# ============================================================
+def align_curves(curves):
+    """تطبيع أطوال جميع المنحنيات لتتساوى مع أقصر منحنى"""
+    # تجاهل المنحنيات الفارغة
+    valid_curves = {k: v for k, v in curves.items() if len(v) > 0}
+    if not valid_curves:
+        return {}, 0
+    # إيجاد أقصر طول
+    min_len = min([len(v) for v in valid_curves.values()])
+    # تقطيع الكل إلى أقصر طول
+    aligned = {k: v[:min_len] for k, v in valid_curves.items()}
+    return aligned, min_len
+
+# ============================================================
+# دالة التحويل إلى LAS (مع توحيد الأطوال)
 # ============================================================
 def convert_file_fast(file_bytes, file_name, output_format="las", progress_callback=None):
     try:
         dlis_files, method, error = read_file_ultimate(file_bytes, file_name)
-        if error or not dlis_files: return None, error, None
+        if error or not dlis_files: 
+            return None, error, None
         dlis_file = dlis_files[0]
-        curves = get_all_curves(dlis_file)
-        if not curves: return None, "لا توجد بيانات للتحويل", None
+        curves_raw = get_all_curves(dlis_file)
+        if not curves_raw: 
+            return None, "لا توجد بيانات للتحويل", None
         
-        if progress_callback: progress_callback(50)
+        if progress_callback: 
+            progress_callback(30)
+        
+        # توحيد الأطوال (محاذاة جميع المنحنيات لأقصر طول)
+        curves, common_len = align_curves(curves_raw)
+        if not curves:
+            return None, "لا توجد منحنيات صالحة بعد التوحيد", None
+        
+        if progress_callback: 
+            progress_callback(60)
         
         if output_format == "las":
             las = lasio.LASFile()
             
-            well_name_val = str(getattr(dlis_file, 'well_name', 'UNKNOWN'))
-            if 'WELL' in las.well:
-                las.well['WELL'].value = well_name_val
-            else:
-                las.well.append(lasio.HeaderItem('WELL', value=well_name_val))
+            # إضافة معلومات البئر
+            well_name = getattr(dlis_file, 'well_name', 'UNKNOWN')
+            # الطريقة المتوافقة مع lasio الجديد
+            if hasattr(las, 'well'):
+                if hasattr(las.well, 'WELL'):
+                    las.well.WELL.value = well_name
+                elif hasattr(las.well, 'items'):
+                    las.well['WELL'] = lasio.WellItem('WELL', value=well_name)
             
+            # إضافة المنحنيات المتوافقة
             for name, data in curves.items():
                 if len(data) > 0:
-                    las.append_curve(name, data, unit="", descr=name)
+                    try:
+                        las.append_curve(name, data, unit="", descr=name)
+                    except Exception as e:
+                        st.warning(f"تعذرت إضافة المنحنى {name}: {e}")
             
-            if len(las.keys()) > 0:
-                first_key = las.keys()[0]
-                if len(las.data[first_key]) > 0:
-                    depth = np.arange(len(las.data[first_key])) * 0.1524
-                    if "DEPT" not in las.keys():
-                        las.insert_curve(0, "DEPT", depth, unit="m", descr="Depth")
+            # إضافة عمق افتراضي إذا لم يكن موجوداً
+            if 'DEPT' not in las.keys() and common_len > 0:
+                depth = np.arange(common_len) * 0.1524
+                las.append_curve('DEPT', depth, unit="m", descr="Depth")
             
+            # تصدير الملف
             output = io.StringIO()
             las.write(output, version=2)
-            if progress_callback: progress_callback(100)
+            
+            if progress_callback: 
+                progress_callback(100)
+            
             return output.getvalue().encode('utf-8'), None, curves
             
         elif output_format == "dlis":
-            if progress_callback: progress_callback(100)
+            if progress_callback: 
+                progress_callback(100)
             return file_bytes, None, None
+            
     except Exception as e:
-        return None, f"خطأ أثناء التحويل: {str(e)}", None
+        return None, str(e), None
 
+# ============================================================
+# دوال تحليل الجودة والمقارنة (مع تعديل طفيف)
+# ============================================================
 def analyze_file_quality(file_bytes, file_name):
     report = {
         "file_name": file_name, "status": "✅ نجاح", "warnings": [], "errors": [],
@@ -326,18 +374,23 @@ def analyze_file_quality(file_bytes, file_name):
         report["errors"].append(str(e))
         
     report["quality_score"] = max(0, min(100, report["quality_score"]))
-    if report["quality_score"] >= 80: report["quality_grade"] = "⭐ ممتاز"
-    elif report["quality_score"] >= 50: report["quality_grade"] = "⚠️ جيد"
-    else: report["quality_grade"] = "❌ ضعيف"
+    if report["quality_score"] >= 80: 
+        report["quality_grade"] = "⭐ ممتاز"
+    elif report["quality_score"] >= 50: 
+        report["quality_grade"] = "⚠️ جيد"
+    else: 
+        report["quality_grade"] = "❌ ضعيف"
     
     return report
 
 def plot_log_data(data_dict, max_curves=6):
-    if not data_dict: return None
+    if not data_dict: 
+        return None
     items = [(n, d) for n, d in data_dict.items() if len(d) > 10 and not np.isnan(d).all()]
     items.sort(key=lambda x: len(x[1]), reverse=True)
     items = items[:max_curves]
-    if not items: return None
+    if not items: 
+        return None
     fig = make_subplots(rows=1, cols=len(items), subplot_titles=[n for n, _ in items], shared_yaxes=True, horizontal_spacing=0.05)
     for i, (name, data) in enumerate(items):
         depth = np.arange(len(data)) * 0.1524
@@ -348,43 +401,57 @@ def plot_log_data(data_dict, max_curves=6):
     return fig
 
 def compare_data(orig, conv, curve_names=None):
-    if curve_names is None: curve_names = set(orig.keys()) & set(conv.keys())
+    if curve_names is None: 
+        curve_names = set(orig.keys()) & set(conv.keys())
     results = []
     for name in curve_names:
         o = np.array(orig[name]); c = np.array(conv[name])
-        min_len = min(len(o), len(c)); o = o[:min_len]; c = c[:min_len]
+        min_len = min(len(o), len(c))
+        o = o[:min_len]; c = c[:min_len]
         valid = ~(np.isnan(o) | np.isnan(c))
         if np.sum(valid) > 0:
             ov = o[valid]; cv = c[valid]
             results.append({
-                'curve_name': name, 'points_compared': np.sum(valid),
-                'max_abs_diff': np.max(np.abs(ov - cv)), 'mean_abs_diff': np.mean(np.abs(ov - cv)),
+                'curve_name': name, 
+                'points_compared': np.sum(valid),
+                'max_abs_diff': np.max(np.abs(ov - cv)), 
+                'mean_abs_diff': np.mean(np.abs(ov - cv)),
                 'identical': np.allclose(ov, cv, rtol=1e-10, atol=1e-10),
-                'nan_count_orig': np.isnan(o).sum(), 'nan_count_conv': np.isnan(c).sum()
+                'nan_count_orig': np.isnan(o).sum(), 
+                'nan_count_conv': np.isnan(c).sum()
             })
     return results
 
 def display_comparison_stats(results):
-    if not results: st.info("لا توجد بيانات للمقارنة"); return
+    if not results: 
+        st.info("لا توجد بيانات للمقارنة"); 
+        return
     df = pd.DataFrame(results)
     identical_count = sum(df['identical'])
     total = len(df)
     col1, col2, col3 = st.columns(3)
     with col1:
-        if identical_count == total: st.markdown('<div class="match-perfect">✅ <b>مطابقة تامة!</b></div>', unsafe_allow_html=True)
-        elif identical_count / total > 0.8: st.markdown('<div class="match-warning">⚠️ <b>جيدة جداً</b></div>', unsafe_allow_html=True)
-        else: st.markdown('<div class="match-error">❌ <b>اختلافات</b></div>', unsafe_allow_html=True)
-    with col2: st.metric("📊 عدد المنحنيات", total)
-    with col3: st.metric("✅ متطابقة", f"{identical_count}/{total}")
+        if identical_count == total: 
+            st.markdown('<div class="match-perfect">✅ <b>مطابقة تامة!</b></div>', unsafe_allow_html=True)
+        elif identical_count / total > 0.8: 
+            st.markdown('<div class="match-warning">⚠️ <b>جيدة جداً</b></div>', unsafe_allow_html=True)
+        else: 
+            st.markdown('<div class="match-error">❌ <b>اختلافات</b></div>', unsafe_allow_html=True)
+    with col2: 
+        st.metric("📊 عدد المنحنيات", total)
+    with col3: 
+        st.metric("✅ متطابقة", f"{identical_count}/{total}")
     st.dataframe(df[['curve_name', 'points_compared', 'max_abs_diff', 'mean_abs_diff', 'identical']], use_container_width=True)
 
 def plot_comparison(orig, conv, curve_names, max_curves=4):
     common = [c for c in curve_names if c in orig and c in conv][:max_curves]
-    if not common: return None
+    if not common: 
+        return None
     fig = make_subplots(rows=1, cols=len(common)*2, subplot_titles=[f"{c} (أصلي)" for c in common] + [f"{c} (محول)" for c in common], shared_yaxes=True, horizontal_spacing=0.03)
     for i, name in enumerate(common):
         o = np.array(orig[name]); c = np.array(conv[name])
-        min_len = min(len(o), len(c)); o = o[:min_len]; c = c[:min_len]
+        min_len = min(len(o), len(c))
+        o = o[:min_len]; c = c[:min_len]
         depth = np.arange(min_len) * 0.1524
         fig.add_trace(go.Scatter(x=o, y=depth, mode='lines', name=f'{name} (أصلي)', line=dict(color='blue', width=2)), row=1, col=i*2+1)
         fig.add_trace(go.Scatter(x=c, y=depth, mode='lines', name=f'{name} (محول)', line=dict(color='red', width=2, dash='dash')), row=1, col=i*2+2)
@@ -424,12 +491,16 @@ if uploaded_files:
                 if data and error is None:
                     st.info(f"📌 طريقة القراءة: **{data.get('method', 'غير معروف')}**")
                     col1, col2, col3 = st.columns(3)
-                    with col1: st.metric("🏷️ اسم البئر", data['well_info']['well_name'])
-                    with col2: st.metric("📊 عدد المنحنيات", data['well_info']['total_curves'])
-                    with col3: st.metric("🔧 الطريقة", data['well_info']['method'])
+                    with col1: 
+                        st.metric("🏷️ اسم البئر", data['well_info']['well_name'])
+                    with col2: 
+                        st.metric("📊 عدد المنحنيات", data['well_info']['total_curves'])
+                    with col3: 
+                        st.metric("🔧 الطريقة", data['well_info']['method'])
                     
                     fig = plot_log_data(data['all_data'])
-                    if fig: st.plotly_chart(fig, use_container_width=True)
+                    if fig: 
+                        st.plotly_chart(fig, use_container_width=True)
                     
                     with st.expander("📋 تفاصيل المنحنيات"):
                         for frame in data['frames']:
@@ -440,9 +511,12 @@ if uploaded_files:
     
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
-    with col1: output_format = st.selectbox("🔄 صيغة الإخراج:", ["las", "dlis"])
-    with col2: compress = st.checkbox("📦 ضغط ZIP", value=True)
-    with col3: enable_comparison = st.checkbox("🔍 مقارنة بعد التحويل", value=True)
+    with col1: 
+        output_format = st.selectbox("🔄 صيغة الإخراج:", ["las", "dlis"])
+    with col2: 
+        compress = st.checkbox("📦 ضغط ZIP", value=True)
+    with col3: 
+        enable_comparison = st.checkbox("🔍 مقارنة بعد التحويل", value=True)
     
     if st.button("🚀 تحويل الكل", type="primary", use_container_width=True):
         with st.spinner("🔍 تحليل الجودة..."):
@@ -460,9 +534,12 @@ if uploaded_files:
         success_files = sum(1 for r in quality_reports if r["status"] == "✅ نجاح")
         avg_score = np.mean([r["quality_score"] for r in quality_reports])
         col1, col2, col3, col4 = st.columns(4)
-        with col1: st.metric("📁 المجموع", total_files)
-        with col2: st.metric("✅ صالحة", success_files)
-        with col3: st.metric("📊 متوسط الجودة", f"{avg_score:.0f}%")
+        with col1: 
+            st.metric("📁 المجموع", total_files)
+        with col2: 
+            st.metric("✅ صالحة", success_files)
+        with col3: 
+            st.metric("📊 متوسط الجودة", f"{avg_score:.0f}%")
         with col4:
             grade = "⭐ ممتاز" if avg_score >= 80 else "⚠️ جيد" if avg_score >= 50 else "❌ ضعيف"
             st.metric("🏆 التقييم", grade)
@@ -472,7 +549,8 @@ if uploaded_files:
                 st.write(f"**طريقة:** {report['method_used']}")
                 st.write(f"**المنحنيات:** {report['curves_count']}")
                 st.write(f"**اسم البئر:** {report['info'].get('well_name', 'غير معروف')}")
-                if report["warnings"]: st.warning(f"⚠️ {', '.join(report['warnings'])}")
+                if report["warnings"]: 
+                    st.warning(f"⚠️ {', '.join(report['warnings'])}")
         
         st.markdown("### ⚡ جاري التحويل...")
         prog = st.progress(0)
@@ -485,7 +563,8 @@ if uploaded_files:
             if enable_comparison:
                 file.seek(0)
                 d, _ = read_log_file(file.read(), file.name)
-                if d: orig_data = d['all_data']
+                if d: 
+                    orig_data = d['all_data']
                 file.seek(0)
             
             def update(pct):
@@ -502,13 +581,16 @@ if uploaded_files:
                     try:
                         las_data, _ = read_las_file(result)
                         if las_data:
-                            comp = compare_data(orig_data, las_data)
+                            # توحيد أطوال البيانات الأصلية والمحولة للمقارنة أيضاً
+                            aligned_orig, _ = align_curves(orig_data)
+                            comp = compare_data(aligned_orig, las_data)
                             st.markdown(f"---")
                             st.markdown(f"### 🔍 مقارنة: {file.name}")
                             display_comparison_stats(comp)
                             common = [c['curve_name'] for c in comp]
-                            fig_c = plot_comparison(orig_data, las_data, common)
-                            if fig_c: st.plotly_chart(fig_c, use_container_width=True)
+                            fig_c = plot_comparison(aligned_orig, las_data, common)
+                            if fig_c: 
+                                st.plotly_chart(fig_c, use_container_width=True)
                     except Exception as e:
                         st.warning(f"تعذرت المقارنة: {e}")
             else:
@@ -520,13 +602,16 @@ if uploaded_files:
         
         st.markdown("### 📦 النتائج النهائية")
         col1, col2 = st.columns(2)
-        with col1: st.success(f"✅ نجح: {len(converted)} ملف")
+        with col1: 
+            st.success(f"✅ نجح: {len(converted)} ملف")
         with col2:
-            if failed: st.error(f"❌ فشل: {len(failed)} ملف")
+            if failed: 
+                st.error(f"❌ فشل: {len(failed)} ملف")
         
         if failed:
             with st.expander("❌ عرض أسباب الفشل للملفات"):
-                for name, error in failed: st.write(f"- **{name}**: {error}")
+                for name, error in failed: 
+                    st.write(f"- **{name}**: {error}")
         
         if converted:
             if compress and len(converted) > 1:
