@@ -1,0 +1,211 @@
+import streamlit as st
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import matplotlib.ticker as ticker
+from scipy.stats import skew, probplot
+import io
+
+# إعداد صفحة Streamlit
+st.set_page_config(page_title="Volumetric Risk Analysis", layout="wide", page_icon="🛢️")
+st.title("🛢️ Volumetric Risk Analysis - Monte Carlo Simulation")
+st.markdown("### Professional Reservoir Uncertainty Assessment")
+
+# شريط جانبي للإعدادات الأساسية
+with st.sidebar:
+    st.header("⚙️ Simulation Settings")
+    iterations = st.number_input("Number of iterations", min_value=1000, max_value=100000, value=100000, step=1000)
+    rock_volume_m3 = st.number_input("Gross Rock Volume (m³)", value=80576000.0, step=1000000.0)
+    st.markdown("---")
+    st.markdown("### Input Parameters Distribution")
+    st.markdown("For each parameter, enter Min, Med, Max and choose distribution type.")
+
+# الدوال المساعدة للتوزيعات
+def triangular_sample(min_val, med_val, max_val, size):
+    return np.random.triangular(min_val, med_val, max_val, size)
+
+def normal_sample(min_val, med_val, max_val, size):
+    mean = med_val
+    std = (max_val - min_val) / 4
+    samples = np.random.normal(mean, std, size)
+    return np.clip(samples, min_val, max_val)
+
+def uniform_sample(min_val, max_val, size):
+    return np.random.uniform(min_val, max_val, size)
+
+def sample_from_dist(dist, min_val, med_val, max_val, size):
+    if dist == "Triangular":
+        return triangular_sample(min_val, med_val, max_val, size)
+    elif dist == "Normal":
+        return normal_sample(min_val, med_val, max_val, size)
+    else:
+        return uniform_sample(min_val, max_val, size)
+
+# إنشاء مدخلات المستخدم للمتغيرات (باستخدام 3 أعمدة)
+col1, col2, col3, col4, col5 = st.columns(5)
+
+with col1:
+    st.subheader("📊 NTG")
+    ntg_min = st.number_input("Min", value=0.17, key="ntg_min", step=0.01)
+    ntg_med = st.number_input("Med", value=0.30, key="ntg_med", step=0.01)
+    ntg_max = st.number_input("Max", value=0.42, key="ntg_max", step=0.01)
+    ntg_dist = st.selectbox("Distribution", ["Triangular", "Normal", "Uniform"], key="ntg_dist")
+
+with col2:
+    st.subheader("🧫 Porosity")
+    por_min = st.number_input("Min", value=0.09, key="por_min", step=0.01)
+    por_med = st.number_input("Med", value=0.12, key="por_med", step=0.01)
+    por_max = st.number_input("Max", value=0.18, key="por_max", step=0.01)
+    por_dist = st.selectbox("Distribution", ["Triangular", "Normal", "Uniform"], key="por_dist")
+
+with col3:
+    st.subheader("💧 Water Saturation")
+    sw_min = st.number_input("Min", value=0.30, key="sw_min", step=0.01)
+    sw_med = st.number_input("Med", value=0.40, key="sw_med", step=0.01)
+    sw_max = st.number_input("Max", value=0.48, key="sw_max", step=0.01)
+    sw_dist = st.selectbox("Distribution", ["Triangular", "Normal", "Uniform"], key="sw_dist")
+
+with col4:
+    st.subheader("📈 Recovery Factor")
+    rf_min = st.number_input("Min", value=0.16, key="rf_min", step=0.01)
+    rf_med = st.number_input("Med", value=0.18, key="rf_med", step=0.01)
+    rf_max = st.number_input("Max", value=0.22, key="rf_max", step=0.01)
+    rf_dist = st.selectbox("Distribution", ["Triangular", "Normal", "Uniform"], key="rf_dist")
+
+with col5:
+    st.subheader("⚙️ Oil FVF (Boi)")
+    boi_min = st.number_input("Min", value=1.15, key="boi_min", step=0.01)
+    boi_med = st.number_input("Med", value=1.20, key="boi_med", step=0.01)
+    boi_max = st.number_input("Max", value=1.28, key="boi_max", step=0.01)
+    boi_dist = st.selectbox("Distribution", ["Triangular", "Normal", "Uniform"], key="boi_dist")
+
+# زر تشغيل المحاكاة
+if st.button("🚀 Run Simulation", type="primary", use_container_width=True):
+    with st.spinner("Running Monte Carlo simulation..."):
+        rock_volume = rock_volume_m3 * 0.0008107132   # تحويل إلى acre-ft
+
+        # توليد العينات
+        ntg = sample_from_dist(ntg_dist, ntg_min, ntg_med, ntg_max, iterations)
+        porosity = sample_from_dist(por_dist, por_min, por_med, por_max, iterations)
+        sw = sample_from_dist(sw_dist, sw_min, sw_med, sw_max, iterations)
+        rf = sample_from_dist(rf_dist, rf_min, rf_med, rf_max, iterations)
+        boi = sample_from_dist(boi_dist, boi_min, boi_med, boi_max, iterations)
+
+        # حسابات الحجم
+        ooip = (7758 * rock_volume * ntg * porosity * (1 - sw)) / boi
+        recoverable_oil = ooip * rf
+        recoverable_oil_mm = recoverable_oil / 1_000_000
+
+        # الإحصائيات
+        rec_p90 = np.percentile(recoverable_oil_mm, 10)
+        rec_p50 = np.percentile(recoverable_oil_mm, 50)
+        rec_p10 = np.percentile(recoverable_oil_mm, 90)
+        rec_mean = np.mean(recoverable_oil_mm)
+        rec_std = np.std(recoverable_oil_mm)
+        rec_cv = rec_std / rec_mean
+        rec_skew = skew(recoverable_oil_mm)
+
+        # عرض النتائج في صفوف جميلة
+        st.subheader("📊 Results Summary (Recoverable Oil)")
+        col_res1, col_res2, col_res3, col_res4 = st.columns(4)
+        col_res1.metric("P90 (Conservative)", f"{rec_p90:.2f} MMSTB")
+        col_res2.metric("P50 (Most Likely)", f"{rec_p50:.2f} MMSTB")
+        col_res3.metric("P10 (Optimistic)", f"{rec_p10:.2f} MMSTB")
+        col_res4.metric("Mean", f"{rec_mean:.2f} MMSTB")
+        col_res5, col_res6, col_res7, col_res8 = st.columns(4)
+        col_res5.metric("Std Dev", f"{rec_std:.2f} MMSTB")
+        col_res6.metric("CV (Risk)", f"{rec_cv:.3f}")
+        col_res7.metric("Skewness", f"{rec_skew:.3f}")
+        col_res8.metric("VaR 95%", f"{np.percentile(recoverable_oil_mm, 5):.2f} MMSTB")
+
+        # تجهيز البيانات للرسوم البيانية
+        df = pd.DataFrame({
+            'Net-to-Gross': ntg,
+            'Porosity': porosity,
+            'Water Saturation': sw,
+            'Recovery Factor': rf,
+            'Oil FVF': boi,
+            'Recoverable Oil (MMSTB)': recoverable_oil_mm
+        })
+
+        correlations = df.corr(method='spearman')['Recoverable Oil (MMSTB)'].drop('Recoverable Oil (MMSTB)')
+        correlations_sorted = correlations.sort_values(key=abs)
+
+        # إنشاء الشكل والرسوم البيانية
+        sns.set_theme(style="whitegrid", palette="muted")
+        fig, axs = plt.subplots(2, 3, figsize=(20, 12))
+        fig.suptitle('Professional Volumetric Risk Analysis - Monte Carlo', fontsize=18, fontweight='bold')
+        ax1, ax2, ax3, ax4, ax5, ax6 = axs.flatten()
+        formatter = ticker.FuncFormatter(lambda x, p: f'{x:.1f}')
+
+        # رسم 1: Histogram + KDE
+        sns.histplot(recoverable_oil_mm, bins=80, kde=True, color='#2ab7ca', ax=ax1)
+        ax1.axvline(rec_p90, color='#e91e63', linestyle='--', label=f'P90: {rec_p90:.1f}')
+        ax1.axvline(rec_p50, color='#4caf50', linestyle='-', label=f'P50: {rec_p50:.1f}')
+        ax1.axvline(rec_p10, color='#2196f3', linestyle='--', label=f'P10: {rec_p10:.1f}')
+        ax1.axvline(rec_mean, color='#ff9800', linestyle=':', label=f'Mean: {rec_mean:.1f}')
+        ax1.set_title('1. Probability Distribution')
+        ax1.set_xlabel('MMSTB')
+        ax1.legend()
+        ax1.xaxis.set_major_formatter(formatter)
+
+        # رسم 2: Cumulative
+        sns.ecdfplot(recoverable_oil_mm, color='#673ab7', linewidth=2, ax=ax2)
+        ax2.set_title('2. Standard Cumulative (Less Than)')
+        ax2.set_xlabel('MMSTB')
+        ax2.set_ylabel('Probability')
+        ax2.xaxis.set_major_formatter(formatter)
+
+        # رسم 3: Exceedance
+        sns.ecdfplot(recoverable_oil_mm, color='#ff9800', linewidth=2, complementary=True, ax=ax3)
+        ax3.axhline(0.90, color='#e91e63', linestyle=':', alpha=0.7)
+        ax3.axvline(rec_p90, color='#e91e63', linestyle='--', linewidth=1.5, label='P90')
+        ax3.axhline(0.50, color='#4caf50', linestyle=':', alpha=0.7)
+        ax3.axvline(rec_p50, color='#4caf50', linestyle='-', linewidth=1.5, label='P50')
+        ax3.axhline(0.10, color='#2196f3', linestyle=':', alpha=0.7)
+        ax3.axvline(rec_p10, color='#2196f3', linestyle='--', linewidth=1.5, label='P10')
+        ax3.set_title('3. Exceedance Probability (Greater Than)')
+        ax3.set_xlabel('MMSTB')
+        ax3.set_ylabel('Probability')
+        ax3.legend()
+        ax3.xaxis.set_major_formatter(formatter)
+
+        # رسم 4: Heatmap
+        corr_matrix = df.drop('Recoverable Oil (MMSTB)', axis=1).corr(method='spearman')
+        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', center=0, fmt='.2f', linewidths=0.5, ax=ax4, annot_kws={'size': 8})
+        ax4.set_title('4. Spearman Correlation Heatmap')
+        ax4.tick_params(axis='x', rotation=45)
+
+        # رسم 5: Tornado
+        colors_tornado = ['#f44336' if x < 0 else '#4caf50' for x in correlations_sorted.values]
+        ax5.barh(correlations_sorted.index, correlations_sorted.values, color=colors_tornado, edgecolor='black')
+        ax5.axvline(0, color='black', linewidth=1)
+        ax5.axvline(0.1, color='gray', linestyle='--', alpha=0.7)
+        ax5.axvline(-0.1, color='gray', linestyle='--', alpha=0.7)
+        ax5.set_title('5. Tornado Chart - Sensitivity')
+        ax5.set_xlabel('Spearman Correlation Coefficient')
+        ax5.set_xlim(-1, 1)
+        for i, (var, val) in enumerate(correlations_sorted.items()):
+            ax5.text(val + (0.03 if val >= 0 else -0.09), i, f'{val:.2f}', va='center', fontweight='bold', fontsize=9)
+
+        # رسم 6: Q-Q Plot
+        probplot(recoverable_oil_mm, dist='norm', plot=ax6)
+        ax6.set_title('6. Q-Q Plot vs Normal Distribution')
+        ax6.set_xlabel('Theoretical Quantiles')
+        ax6.set_ylabel('Sample Quantiles (MMSTB)')
+        lines = ax6.get_lines()
+        if len(lines) >= 1:
+            lines[0].set_marker('o')
+            lines[0].set_markersize(2)
+            lines[0].set_color('#2ab7ca')
+        if len(lines) >= 2:
+            lines[1].set_color('#e91e63')
+            lines[1].set_linewidth(2)
+
+        plt.tight_layout()
+        st.pyplot(fig)
+
+        # عرض جدول بيانات للتنزيل (اختياري)
+        csv = df[['Recoverable Oil (MMSTB)']].head(1000).to_csv(index=False)
+        st.download_button("📥 Download sample results (first 1000 rows)", csv, "recoverable_oil.csv", "text/csv")
