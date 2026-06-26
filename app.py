@@ -29,84 +29,91 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🛢️ Log Converter Pro - LIS/DLIS to LAS")
-st.markdown("يدعم التحويل مع قراءة قوية للملفات القديمة والحديثة")
+st.markdown("يدعم التحويل مع قراءة الهيدر وأسماء المنحنيات والوحدات")
 
 # ============================================================
-# الدالة السحرية: القراءة الخام للملفات العنيدة
+# دالة قراءة الملف مع محاولة Big Endian
 # ============================================================
-def extract_curves_from_raw(data_bytes):
+def extract_curves_from_raw_advanced(data_bytes):
+    """
+    محاولة استخراج البيانات مع تجربة جميع ترتيبات البايتات (Endianness)
+    لأن LIS القديم غالباً Big Endian
+    """
     curves = {}
-    try:
-        float_data = np.frombuffer(data_bytes, dtype=np.float32)
-        if len(float_data) > 20:
-            curves['RAW_FLOAT32'] = float_data
-            if len(float_data) > 1000:
-                for i in range(1, min(5, len(float_data) // 100)):
-                    chunk = float_data[i::i+1]
-                    if len(chunk) > 50 and not np.isnan(chunk).all():
-                        curves[f'CURVE_{i}'] = chunk
-    except: pass
     
-    try:
-        float64_data = np.frombuffer(data_bytes, dtype=np.float64)
-        if len(float64_data) > 20:
-            curves['RAW_FLOAT64'] = float64_data
-    except: pass
+    # قائمة الترتيبات الممكنة
+    dtypes_to_try = [
+        ('>f4', 'BE_FLOAT32'),   # Big Endian 32-bit (الأكثر شيوعاً في LIS القديم)
+        ('<f4', 'LE_FLOAT32'),   # Little Endian 32-bit
+        ('>f8', 'BE_FLOAT64'),   
+        ('<f8', 'LE_FLOAT64'),
+        ('>i4', 'BE_INT32'),
+        ('<i4', 'LE_INT32'),
+    ]
     
-    try:
-        int_data = np.frombuffer(data_bytes, dtype=np.int32)
-        if len(int_data) > 20:
-            curves['RAW_INT32'] = int_data.astype(np.float32)
-    except: pass
+    for dtype, name in dtypes_to_try:
+        try:
+            data = np.frombuffer(data_bytes, dtype=dtype)
+            if len(data) > 20:
+                # تنظيف البيانات
+                data = data[np.isfinite(data)]
+                if len(data) > 20:
+                    # إزالة القيم الشاذة
+                    mean = np.mean(data)
+                    std = np.std(data)
+                    if std > 0:
+                        data = data[np.abs(data - mean) <= 3 * std]
+                    if len(data) > 20:
+                        curves[name] = data
+                        # محاولة تقسيم إلى منحنيات متعددة إذا كانت كبيرة
+                        if len(data) > 500:
+                            for i in range(1, min(4, len(data) // 100)):
+                                chunk = data[i::i+1]
+                                if len(chunk) > 50:
+                                    curves[f'{name}_CURVE_{i}'] = chunk
+        except:
+            continue
     
+    # محاولة البحث عن أسماء المنحنيات في النص (مثلما تفعل Techlog)
     try:
         text = data_bytes.decode('latin-1', errors='ignore')
-        known_curves = ['GR', 'RES', 'DT', 'NPHI', 'RHOB', 'SP', 'CALI', 'DEPT']
-        for curve in known_curves:
-            if curve in text:
-                pattern = rf'{curve}\s*([\d\.\-\s]+)'
-                matches = re.findall(pattern, text)
-                if matches:
-                    nums = re.findall(r'[\d\.\-]+', ' '.join(matches))
+        # البحث عن أسماء منحنيات معروفة ووحداتها
+        known_patterns = [
+            (r'GR\s*\(([^)]+)\)', 'GR'),
+            (r'RES\s*\(([^)]+)\)', 'RES'),
+            (r'DT\s*\(([^)]+)\)', 'DT'),
+            (r'NPHI\s*\(([^)]+)\)', 'NPHI'),
+            (r'RHOB\s*\(([^)]+)\)', 'RHOB'),
+            (r'SP\s*\(([^)]+)\)', 'SP'),
+            (r'CALI\s*\(([^)]+)\)', 'CALI'),
+            (r'DEPT\s*\(([^)]+)\)', 'DEPT'),
+        ]
+        
+        for pattern, name in known_patterns:
+            matches = re.findall(pattern, text)
+            if matches:
+                # حاول استخراج الأرقام بعد اسم المنحنى
+                num_pattern = rf'{name}\s*([\d\.\-\s]+)'
+                num_matches = re.findall(num_pattern, text)
+                if num_matches:
+                    nums = re.findall(r'[\d\.\-]+', ' '.join(num_matches))
                     if nums:
                         data = np.array([float(n) for n in nums if n.strip()])
                         if len(data) > 10:
-                            curves[f'TEXT_{curve}'] = data
-    except: pass
+                            curves[f'TEXT_{name}'] = data
+    except:
+        pass
     
-    if not curves:
-        chunk_size = len(data_bytes) // 4
-        for i in range(4):
-            start = i * chunk_size
-            end = (i + 1) * chunk_size
-            chunk = data_bytes[start:end]
-            try:
-                data = np.frombuffer(chunk, dtype=np.float32)
-                if len(data) > 20:
-                    curves[f'CHUNK_{i+1}'] = data
-            except: pass
-    
-    for name in list(curves.keys()):
-        data = curves[name]
-        if len(data) > 0:
-            data = data[np.isfinite(data)]
-            if len(data) > 0:
-                mean = np.mean(data)
-                std = np.std(data)
-                if std > 0:
-                    data = data[np.abs(data - mean) <= 3 * std]
-                curves[name] = data
-            else:
-                del curves[name]
     return curves
 
 # ============================================================
-# دالة قراءة الملف بكل الطرق الممكنة
+# دالة قراءة الملف بكل الطرق (مع دعم أفضل)
 # ============================================================
 def read_file_ultimate(file_bytes, file_name):
     errors = []
+    well_header = {}
     
-    # المحاولة 1: dlisio
+    # المحاولة 1: dlisio (الطريقة الرسمية)
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.lis') as tmp:
@@ -117,7 +124,21 @@ def read_file_ultimate(file_bytes, file_name):
         parsed_files = list(files) if isinstance(files, tuple) else [files]
         
         if parsed_files:
-            return parsed_files, "DLIS/LIS (dlisio)", None
+            # محاولة استخراج الهيدر من الكائنات
+            obj = parsed_files[0]
+            # استخراج اسم البئر
+            if hasattr(obj, 'well_name'):
+                well_header['well_name'] = obj.well_name
+            elif hasattr(obj, 'name'):
+                well_header['well_name'] = obj.name
+            else:
+                well_header['well_name'] = 'UNKNOWN'
+            
+            # محاولة استخراج الحقول الأخرى
+            if hasattr(obj, 'field_name'):
+                well_header['field_name'] = obj.field_name
+            
+            return parsed_files, "DLIS/LIS (dlisio)", None, well_header
     except Exception as e:
         errors.append(f"DLISIO: {e}")
     finally:
@@ -131,10 +152,11 @@ def read_file_ultimate(file_bytes, file_name):
         las_text = file_bytes.decode('ascii', errors='ignore')
         las = lasio.read(io.StringIO(las_text))
         if las.curves:
+            well_header['well_name'] = las.well.WELL.value if hasattr(las.well, 'WELL') else "LAS_FILE"
             class LasWrap:
                 def __init__(self, las):
                     self.las = las
-                    self.well_name = las.well.WELL.value if hasattr(las.well, 'WELL') else "LAS"
+                    self.well_name = well_header['well_name']
                 @property
                 def frames(self):
                     class F:
@@ -145,22 +167,24 @@ def read_file_ultimate(file_bytes, file_name):
                                 def __init__(self, m, d):
                                     self.name = m
                                     self._data = d
+                                    self.units = ""
                                 def curves(self):
                                     return self._data
                             return [C(c.mnemonic, c.data) for c in self.las.curves]
                     return [F(self.las)]
-            return [LasWrap(las)], "LAS", None
+            return [LasWrap(las)], "LAS", None, well_header
     except Exception as e:
         errors.append(f"LAS: {e}")
     
-    # المحاولة 3: القراءة الخام
+    # المحاولة 3: القراءة الخام المتقدمة (مع Big Endian)
     try:
-        raw_curves = extract_curves_from_raw(file_bytes)
+        raw_curves = extract_curves_from_raw_advanced(file_bytes)
         if raw_curves:
+            well_header['well_name'] = "RAW_LIS"
             class RawWrap:
                 def __init__(self, curves):
                     self._curves = curves
-                    self.well_name = "RAW_BINARY"
+                    self.well_name = "RAW_LIS"
                 @property
                 def frames(self):
                     class F:
@@ -171,115 +195,169 @@ def read_file_ultimate(file_bytes, file_name):
                                 def __init__(self, name, data):
                                     self.name = name
                                     self._data = data
+                                    self.units = ""
                                 def curves(self):
                                     return self._data
                             return [C(k, v) for k, v in self._curves.items()]
                     return [F(self._curves)]
-            return [RawWrap(raw_curves)], "RAW_BINARY", None
+            return [RawWrap(raw_curves)], "RAW_BINARY", None, well_header
     except Exception as e:
         errors.append(f"RAW: {e}")
     
-    return None, None, f"فشل: {'; '.join(errors)}"
+    return None, None, f"فشل: {'; '.join(errors)}", {}
 
 # ============================================================
-# دالة استخراج المنحنيات
+# دالة استخراج المنحنيات مع الوحدات
 # ============================================================
-def get_all_curves(file_obj):
+def get_all_curves_advanced(file_obj):
     curves = {}
+    units = {}
+    descriptions = {}
+    
     try:
-        if hasattr(file_obj, 'frames'):
-            for frame in file_obj.frames:
-                try:
-                    for curve in frame.curves():
-                        name = getattr(curve, 'name', f'CURVE_{len(curves)}')
-                        data = curve.curves()
+        # المحاولة 1: البحث عن Channels في الكائن (أفضل طريقة للحصول على الأسماء والوحدات)
+        if hasattr(file_obj, 'objects'):
+            for obj in file_obj.objects:
+                # البحث عن كائنات من نوع Channel
+                if hasattr(obj, 'type') and 'CHANNEL' in str(obj.type).upper():
+                    name = getattr(obj, 'name', 'UNKNOWN')
+                    unit = getattr(obj, 'units', '')
+                    desc = getattr(obj, 'long_name', '')
+                    # محاولة استخراج البيانات
+                    if hasattr(obj, 'data'):
+                        data = obj.data
                         if data is not None and len(data) > 0:
                             curves[name] = np.array(data)
-                except:
-                    continue
-                    
+                            units[name] = unit
+                            descriptions[name] = desc
+                    elif hasattr(obj, 'curves'):
+                        data = obj.curves()
+                        if data is not None and len(data) > 0:
+                            curves[name] = np.array(data)
+                            units[name] = unit
+                            descriptions[name] = desc
+                # البحث عن Frames التي تحتوي على Channels
+                elif hasattr(obj, 'type') and 'FRAME' in str(obj.type).upper():
+                    if hasattr(obj, 'channels'):
+                        for channel in obj.channels:
+                            c_name = getattr(channel, 'name', 'UNKNOWN')
+                            c_unit = getattr(channel, 'units', '')
+                            # محاولة جلب البيانات من channel
+                            if hasattr(channel, 'data'):
+                                data = channel.data
+                                if data is not None and len(data) > 0:
+                                    curves[c_name] = np.array(data)
+                                    units[c_name] = c_unit
+        # المحاولة 2: الطريقة التقليدية (frames)
+        if not curves and hasattr(file_obj, 'frames'):
+            for frame in file_obj.frames:
+                for curve in frame.curves():
+                    name = getattr(curve, 'name', f'CURVE_{len(curves)}')
+                    unit = getattr(curve, 'units', '')
+                    data = curve.curves()
+                    if data is not None and len(data) > 0:
+                        curves[name] = np.array(data)
+                        units[name] = unit
+        # المحاولة 3: البحث المباشر عن curves
         if not curves and hasattr(file_obj, 'curves'):
             curve_list = file_obj.curves() if callable(file_obj.curves) else file_obj.curves
-            if isinstance(curve_list, (list, tuple)):
+            if isinstance(curve_list, (list, tuple, np.ndarray)):
                 for curve in curve_list:
                     try:
                         name = getattr(curve, 'name', f'CURVE_{len(curves)}')
+                        unit = getattr(curve, 'units', '')
                         data = curve.curves() if hasattr(curve, 'curves') else curve
                         if data is not None and len(data) > 0:
                             curves[name] = np.array(data)
+                            units[name] = unit
                     except: pass
-    except: pass
+    except Exception as e:
+        st.warning(f"تحذير أثناء استخراج المنحنيات: {e}")
     
-    return curves
+    return curves, units, descriptions
 
+# ============================================================
+# دوال القراءة والتحويل الرئيسية (معدلة)
+# ============================================================
 def read_log_file(file_bytes, file_name):
     try:
-        dlis_files, method, error = read_file_ultimate(file_bytes, file_name)
+        dlis_files, method, error, well_header = read_file_ultimate(file_bytes, file_name)
         if error or not dlis_files:
             return None, error or "لا يمكن قراءة الملف"
         
         dlis_file = dlis_files[0]
-        curves = get_all_curves(dlis_file)
+        curves, units, descriptions = get_all_curves_advanced(dlis_file)
         
         if not curves:
             return None, "تم فتح الملف لكن لم يتم العثور على منحنيات مفهومة"
         
+        # توحيد الأطوال
+        valid_curves = {k: v for k, v in curves.items() if len(v) > 0}
+        if not valid_curves:
+            return None, "لا توجد منحنيات صالحة"
+        
+        min_len = min([len(v) for v in valid_curves.values()])
+        aligned_curves = {k: v[:min_len] for k, v in valid_curves.items()}
+        
         well_info = {
-            'well_name': getattr(dlis_file, 'well_name', 'غير معروف'),
+            'well_name': well_header.get('well_name', 'غير معروف'),
+            'field_name': well_header.get('field_name', 'غير معروف'),
             'method': method,
-            'total_curves': len(curves)
+            'total_curves': len(aligned_curves)
         }
         
         frames_info = [{
             'name': 'Main',
-            'curves': [{'name': k, 'data': v, 'count': len(v)} for k, v in curves.items()],
-            'count': len(curves)
+            'curves': [
+                {
+                    'name': k, 
+                    'data': v, 
+                    'count': len(v),
+                    'units': units.get(k, ''),
+                    'description': descriptions.get(k, '')
+                } 
+                for k, v in aligned_curves.items()
+            ],
+            'count': len(aligned_curves)
         }]
         
         return {
             'well_info': well_info,
             'frames': frames_info,
-            'all_data': curves,
-            'method': method
+            'all_data': aligned_curves,
+            'units': units,
+            'descriptions': descriptions,
+            'method': method,
+            'header': well_header
         }, None
     except Exception as e:
         return None, str(e)
 
-# ============================================================
-# دالة لتوحيد أطوال المنحنيات (المفتاح السحري)
-# ============================================================
 def align_curves(curves):
-    """تطبيع أطوال جميع المنحنيات لتتساوى مع أقصر منحنى"""
-    # تجاهل المنحنيات الفارغة
     valid_curves = {k: v for k, v in curves.items() if len(v) > 0}
     if not valid_curves:
         return {}, 0
-    # إيجاد أقصر طول
     min_len = min([len(v) for v in valid_curves.values()])
-    # تقطيع الكل إلى أقصر طول
     aligned = {k: v[:min_len] for k, v in valid_curves.items()}
     return aligned, min_len
 
-# ============================================================
-# دالة التحويل إلى LAS (مع توحيد الأطوال)
-# ============================================================
 def convert_file_fast(file_bytes, file_name, output_format="las", progress_callback=None):
     try:
-        dlis_files, method, error = read_file_ultimate(file_bytes, file_name)
+        dlis_files, method, error, well_header = read_file_ultimate(file_bytes, file_name)
         if error or not dlis_files: 
-            return None, error, None
+            return None, error, None, {}
+        
         dlis_file = dlis_files[0]
-        curves_raw = get_all_curves(dlis_file)
+        curves_raw, units, descriptions = get_all_curves_advanced(dlis_file)
         if not curves_raw: 
-            return None, "لا توجد بيانات للتحويل", None
+            return None, "لا توجد بيانات للتحويل", None, {}
         
         if progress_callback: 
             progress_callback(30)
         
-        # توحيد الأطوال (محاذاة جميع المنحنيات لأقصر طول)
         curves, common_len = align_curves(curves_raw)
         if not curves:
-            return None, "لا توجد منحنيات صالحة بعد التوحيد", None
+            return None, "لا توجد منحنيات صالحة بعد التوحيد", None, {}
         
         if progress_callback: 
             progress_callback(60)
@@ -288,69 +366,71 @@ def convert_file_fast(file_bytes, file_name, output_format="las", progress_callb
             las = lasio.LASFile()
             
             # إضافة معلومات البئر
-            well_name = getattr(dlis_file, 'well_name', 'UNKNOWN')
-            # الطريقة المتوافقة مع lasio الجديد
+            well_name = well_header.get('well_name', 'UNKNOWN')
             if hasattr(las, 'well'):
                 if hasattr(las.well, 'WELL'):
                     las.well.WELL.value = well_name
                 elif hasattr(las.well, 'items'):
                     las.well['WELL'] = lasio.WellItem('WELL', value=well_name)
             
-            # إضافة المنحنيات المتوافقة
+            # إضافة المنحنيات مع الوحدات
             for name, data in curves.items():
                 if len(data) > 0:
                     try:
-                        las.append_curve(name, data, unit="", descr=name)
+                        unit = units.get(name, '')
+                        desc = descriptions.get(name, name)
+                        las.append_curve(name, data, unit=unit, descr=desc)
                     except Exception as e:
                         st.warning(f"تعذرت إضافة المنحنى {name}: {e}")
             
-            # إضافة عمق افتراضي إذا لم يكن موجوداً
+            # إضافة عمق افتراضي
             if 'DEPT' not in las.keys() and common_len > 0:
                 depth = np.arange(common_len) * 0.1524
                 las.append_curve('DEPT', depth, unit="m", descr="Depth")
             
-            # تصدير الملف
             output = io.StringIO()
             las.write(output, version=2)
             
             if progress_callback: 
                 progress_callback(100)
             
-            return output.getvalue().encode('utf-8'), None, curves
+            return output.getvalue().encode('utf-8'), None, curves, units
             
         elif output_format == "dlis":
             if progress_callback: 
                 progress_callback(100)
-            return file_bytes, None, None
+            return file_bytes, None, None, {}
             
     except Exception as e:
-        return None, str(e), None
+        return None, str(e), None, {}
 
 # ============================================================
-# دوال تحليل الجودة والمقارنة (مع تعديل طفيف)
+# دوال تحليل الجودة والمقارنة (معدلة)
 # ============================================================
 def analyze_file_quality(file_bytes, file_name):
     report = {
         "file_name": file_name, "status": "✅ نجاح", "warnings": [], "errors": [],
         "info": {}, "curves_count": 0, "file_size_kb": len(file_bytes) / 1024,
-        "quality_score": 100, "method_used": "غير معروف"
+        "quality_score": 100, "method_used": "غير معروف", "header": {}
     }
     try:
-        dlis_files, method, error = read_file_ultimate(file_bytes, file_name)
+        dlis_files, method, error, well_header = read_file_ultimate(file_bytes, file_name)
         if error or not dlis_files:
             report["status"], report["quality_score"] = "❌ فشل", 0
             report["errors"].append(error or "الملف غير صالح")
             return report
         
         report["method_used"] = method
-        curves = get_all_curves(dlis_files[0])
+        report["header"] = well_header
+        curves, _, _ = get_all_curves_advanced(dlis_files[0])
         report["curves_count"] = len(curves)
         
         if report["curves_count"] == 0:
             report["warnings"].append("لا توجد منحنيات")
             report["quality_score"] -= 30
             
-        report["info"]["well_name"] = getattr(dlis_files[0], 'well_name', 'غير معروف')
+        report["info"]["well_name"] = well_header.get('well_name', 'غير معروف')
+        report["info"]["field_name"] = well_header.get('field_name', 'غير معروف')
         report["info"]["method"] = method
         
         total_points, missing = 0, 0
@@ -383,7 +463,7 @@ def analyze_file_quality(file_bytes, file_name):
     
     return report
 
-def plot_log_data(data_dict, max_curves=6):
+def plot_log_data(data_dict, units=None, max_curves=6):
     if not data_dict: 
         return None
     items = [(n, d) for n, d in data_dict.items() if len(d) > 10 and not np.isnan(d).all()]
@@ -490,22 +570,44 @@ if uploaded_files:
                 file.seek(0)
                 if data and error is None:
                     st.info(f"📌 طريقة القراءة: **{data.get('method', 'غير معروف')}**")
-                    col1, col2, col3 = st.columns(3)
+                    
+                    # عرض الهيدر (معلومات البئر)
+                    st.markdown("#### 📋 معلومات البئر (Header)")
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1: 
                         st.metric("🏷️ اسم البئر", data['well_info']['well_name'])
                     with col2: 
                         st.metric("📊 عدد المنحنيات", data['well_info']['total_curves'])
                     with col3: 
                         st.metric("🔧 الطريقة", data['well_info']['method'])
+                    with col4:
+                        field_name = data['header'].get('field_name', 'غير معروف')
+                        st.metric("🗺️ اسم الحقل", field_name)
                     
+                    # عرض المنحنيات مع الوحدات
+                    st.markdown("#### 📊 المنحنيات المستخرجة مع الوحدات")
+                    curves_df = pd.DataFrame([
+                        {
+                            'المنحنى': c['name'], 
+                            'الوحدة': c.get('units', ''),
+                            'الوصف': c.get('description', ''),
+                            'عدد النقاط': c['count']
+                        } 
+                        for frame in data['frames'] 
+                        for c in frame['curves']
+                    ])
+                    st.dataframe(curves_df, use_container_width=True)
+                    
+                    # الرسوم البيانية
+                    st.markdown("#### 📈 الرسوم البيانية")
                     fig = plot_log_data(data['all_data'])
                     if fig: 
                         st.plotly_chart(fig, use_container_width=True)
                     
-                    with st.expander("📋 تفاصيل المنحنيات"):
+                    with st.expander("📋 تفاصيل المنحنيات (بيانات خام)"):
                         for frame in data['frames']:
                             for curve in frame['curves']:
-                                st.write(f"- {curve['name']} (نقاط: {curve['count']})")
+                                st.write(f"- **{curve['name']}**: نقاط: {curve['count']}, وحدة: {curve.get('units', 'غير محددة')}")
                 else:
                     st.error(f"❌ {error}")
     
@@ -549,6 +651,7 @@ if uploaded_files:
                 st.write(f"**طريقة:** {report['method_used']}")
                 st.write(f"**المنحنيات:** {report['curves_count']}")
                 st.write(f"**اسم البئر:** {report['info'].get('well_name', 'غير معروف')}")
+                st.write(f"**اسم الحقل:** {report['info'].get('field_name', 'غير معروف')}")
                 if report["warnings"]: 
                     st.warning(f"⚠️ {', '.join(report['warnings'])}")
         
@@ -572,7 +675,7 @@ if uploaded_files:
                 prog.progress(min(100, int(overall)))
             
             file.seek(0)
-            result, error, conv_data = convert_file_fast(file.read(), file.name, output_format, update)
+            result, error, conv_data, units = convert_file_fast(file.read(), file.name, output_format, update)
             
             if result:
                 new_name = Path(file.name).stem + f"_converted.{output_format}"
@@ -581,7 +684,6 @@ if uploaded_files:
                     try:
                         las_data, _ = read_las_file(result)
                         if las_data:
-                            # توحيد أطوال البيانات الأصلية والمحولة للمقارنة أيضاً
                             aligned_orig, _ = align_curves(orig_data)
                             comp = compare_data(aligned_orig, las_data)
                             st.markdown(f"---")
@@ -639,4 +741,4 @@ else:
     st.info("👆 ارفع ملفاتك بصيغة LIS أو DLIS في الأعلى للبدء.")
 
 st.markdown("---")
-st.caption("💡 مبني على dlisio - يدعم جميع أنواع LIS القديمة والحديثة")
+st.caption("💡 يدعم Big Endian (لـ LIS القديم) ويعرض أسماء المنحنيات والوحدات")
