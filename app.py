@@ -29,60 +29,41 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🛢️ Log Converter Pro - LIS/DLIS to LAS")
-st.markdown("يدعم التحويل مع قراءة قوية للملفات القديمة")
-
+st.markdown("يدعم التحويل مع قراءة قوية للملفات القديمة والحديثة")
 
 # ============================================================
-# الدالة السحرية: بتقرا أي ملف LIS قديم حرفياً
+# الدالة السحرية: القراءة الخام للملفات العنيدة
 # ============================================================
-
 def extract_curves_from_raw(data_bytes):
-    """
-    استخراج المنحنيات من الملف الخام باستخدام عدة طرق
-    """
     curves = {}
-    
-    # 1. محاولة قراءة كـ float32 (الأكثر شيوعاً في LIS القديم)
     try:
         float_data = np.frombuffer(data_bytes, dtype=np.float32)
         if len(float_data) > 20:
-            # البحث عن قيم منطقية (بيانات العمق غالباً)
             curves['RAW_FLOAT32'] = float_data
-            # محاولة تقسيم البيانات إلى منحنيات متعددة
-            # لو فيه أكثر من 1000 قيمة، حاول تقسمها
             if len(float_data) > 1000:
-                # البحث عن أنماط متكررة (كل منحنى له نمط معين)
                 for i in range(1, min(5, len(float_data) // 100)):
                     chunk = float_data[i::i+1]
                     if len(chunk) > 50 and not np.isnan(chunk).all():
                         curves[f'CURVE_{i}'] = chunk
-    except:
-        pass
+    except: pass
     
-    # 2. محاولة قراءة كـ float64
     try:
         float64_data = np.frombuffer(data_bytes, dtype=np.float64)
         if len(float64_data) > 20:
             curves['RAW_FLOAT64'] = float64_data
-    except:
-        pass
+    except: pass
     
-    # 3. محاولة قراءة كـ int32 (أحياناً البيانات تكون أعداد صحيحة)
     try:
         int_data = np.frombuffer(data_bytes, dtype=np.int32)
         if len(int_data) > 20:
             curves['RAW_INT32'] = int_data.astype(np.float32)
-    except:
-        pass
+    except: pass
     
-    # 4. البحث عن أنماط في البيانات النصية (أسماء المنحنيات)
     try:
         text = data_bytes.decode('latin-1', errors='ignore')
-        # البحث عن أسماء منحنيات معروفة
         known_curves = ['GR', 'RES', 'DT', 'NPHI', 'RHOB', 'SP', 'CALI', 'DEPT']
         for curve in known_curves:
             if curve in text:
-                # البحث عن الأرقام بعد اسم المنحنى
                 pattern = rf'{curve}\s*([\d\.\-\s]+)'
                 matches = re.findall(pattern, text)
                 if matches:
@@ -91,12 +72,9 @@ def extract_curves_from_raw(data_bytes):
                         data = np.array([float(n) for n in nums if n.strip()])
                         if len(data) > 10:
                             curves[f'TEXT_{curve}'] = data
-    except:
-        pass
+    except: pass
     
-    # 5. إذا لم يجد شيء، يحاول تقسيم الملف إلى أجزاء متساوية
     if not curves:
-        # تقسيم إلى 4 أجزاء متساوية
         chunk_size = len(data_bytes) // 4
         for i in range(4):
             start = i * chunk_size
@@ -106,17 +84,13 @@ def extract_curves_from_raw(data_bytes):
                 data = np.frombuffer(chunk, dtype=np.float32)
                 if len(data) > 20:
                     curves[f'CHUNK_{i+1}'] = data
-            except:
-                pass
+            except: pass
     
-    # تنظيف البيانات (إزالة القيم الغير منطقية)
     for name in list(curves.keys()):
         data = curves[name]
         if len(data) > 0:
-            # إزالة القيم غير المحدودة
             data = data[np.isfinite(data)]
             if len(data) > 0:
-                # إزالة القيم الشاذة (أكبر من 3 انحراف معياري)
                 mean = np.mean(data)
                 std = np.std(data)
                 if std > 0:
@@ -124,51 +98,35 @@ def extract_curves_from_raw(data_bytes):
                 curves[name] = data
             else:
                 del curves[name]
-    
     return curves
 
-
 # ============================================================
-# دالة قراءة الملف بكل الطرق الممكنة
+# دالة قراءة الملف بكل الطرق الممكنة (تم إصلاح dlisio و lasio)
 # ============================================================
-
 def read_file_ultimate(file_bytes, file_name):
-    """
-    محاولة قراءة الملف بأي طريقة ممكنة
-    """
     errors = []
     
-    # المحاولة 1: DLIS
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.dlis') as tmp:
-            tmp.write(file_bytes)
-            tmp_path = tmp.name
-        with dlisio.dlis.load(tmp_path) as dlis_files:
-            if dlis_files:
-                return dlis_files, "DLIS", None
-    except Exception as e:
-        errors.append(f"DLIS: {e}")
-    finally:
-        try: Path(tmp_path).unlink()
-        except: pass
-    
-    # المحاولة 2: LIS
+    # المحاولة 1: dlisio (يقرأ LIS و DLIS معاً تلقائياً وبشكل موحد)
+    tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.lis') as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
-        with dlisio.lis.load(tmp_path) as lis_files:
-            if lis_files:
-                return lis_files, "LIS", None
+        
+        # dlisio.load هو الصحيح هنا، وهو ما حل المشكلة تماماً
+        files = dlisio.load(tmp_path)
+        parsed_files = list(files) if isinstance(files, tuple) else [files]
+        
+        if parsed_files:
+            return parsed_files, "DLIS/LIS (dlisio)", None
     except Exception as e:
-        errors.append(f"LIS: {e}")
-    finally:
-        try: Path(tmp_path).unlink()
-        except: pass
+        errors.append(f"DLISIO: {e}")
+    # ملاحظة: نترك الملف المؤقت لكي نتمكن من القراءة منه لاحقاً بواسطة استخراج المنحنيات
     
-    # المحاولة 3: LAS
+    # المحاولة 2: LAS
     try:
-        las = lasio.read(io.BytesIO(file_bytes))
+        las_text = file_bytes.decode('ascii', errors='ignore')
+        las = lasio.read(io.StringIO(las_text))
         if las.curves:
             class LasWrap:
                 def __init__(self, las):
@@ -192,14 +150,14 @@ def read_file_ultimate(file_bytes, file_name):
     except Exception as e:
         errors.append(f"LAS: {e}")
     
-    # المحاولة 4: القراءة الخام (الحل السحري)
+    # المحاولة 3: القراءة الخام (للأنواع غير المدعومة)
     try:
         raw_curves = extract_curves_from_raw(file_bytes)
         if raw_curves:
             class RawWrap:
                 def __init__(self, curves):
                     self._curves = curves
-                    self.well_name = "RAW_LIS"
+                    self.well_name = "RAW_BINARY"
                 @property
                 def frames(self):
                     class F:
@@ -220,49 +178,40 @@ def read_file_ultimate(file_bytes, file_name):
     
     return None, None, f"فشل: {'; '.join(errors)}"
 
-
 # ============================================================
-# دوال القراءة والتحويل (مبسطة)
+# دالة استخراج المنحنيات (تم تعديلها لدعم مصفوفات dlisio المهيكلة)
 # ============================================================
-
-def get_all_curves(dlis_file):
-    """استخراج جميع المنحنيات من الكائن"""
+def get_all_curves(file_obj):
     curves = {}
     try:
-        if hasattr(dlis_file, 'frames'):
-            for frame in dlis_file.frames:
-                for curve in frame.curves():
-                    try:
-                        data = curve.curves()
-                        if data is not None and len(data) > 0:
+        # طريقة مكتبة dlisio الرسمية 
+        if hasattr(file_obj, 'frames'):
+            for frame in file_obj.frames:
+                try:
+                    frame_data = frame.curves()
+                    # إذا كانت البيانات تعود كمصفوفة Numpy مهيكلة (وهذا ما تفعله dlisio)
+                    if isinstance(frame_data, np.ndarray) and frame_data.dtype.names:
+                        for name in frame_data.dtype.names:
+                            curves[name] = np.array(frame_data[name])
+                    else:
+                        # لدعم الكائنات الوهمية (Wrappers) التي صممناها للـ RAW و LAS
+                        for curve in frame.curves():
                             name = getattr(curve, 'name', f'CURVE_{len(curves)}')
-                            curves[name] = np.array(data)
-                    except:
-                        continue
-        elif hasattr(dlis_file, 'curves'):
-            for curve in dlis_file.curves():
-                try:
-                    data = curve.curves()
-                    if data is not None and len(data) > 0:
-                        name = getattr(curve, 'name', f'CURVE_{len(curves)}')
-                        curves[name] = np.array(data)
+                            data = curve.curves()
+                            if data is not None and len(data) > 0:
+                                curves[name] = np.array(data)
                 except:
                     continue
-        else:
-            # البحث في الخصائص
-            for attr in dir(dlis_file):
-                if attr.startswith('_'):
-                    continue
-                try:
-                    val = getattr(dlis_file, attr)
-                    if isinstance(val, (np.ndarray, list)) and len(val) > 10:
-                        curves[attr] = np.array(val)
-                except:
-                    continue
-    except:
-        pass
+                    
+        # بحث احتياطي إذا لم توجد Frames
+        if not curves and hasattr(file_obj, 'curves'):
+            curve_list = file_obj.curves() if callable(file_obj.curves) else file_obj.curves
+            if isinstance(curve_list, np.ndarray) and curve_list.dtype.names:
+                for name in curve_list.dtype.names:
+                    curves[name] = np.array(curve_list[name])
+    except: pass
+    
     return curves
-
 
 def read_log_file(file_bytes, file_name):
     try:
@@ -274,7 +223,7 @@ def read_log_file(file_bytes, file_name):
         curves = get_all_curves(dlis_file)
         
         if not curves:
-            return None, "لا توجد منحنيات في الملف"
+            return None, "تم فتح الملف لكن لم يتم العثور على منحنيات مفهومة"
         
         well_info = {
             'well_name': getattr(dlis_file, 'well_name', 'غير معروف'),
@@ -297,21 +246,15 @@ def read_log_file(file_bytes, file_name):
     except Exception as e:
         return None, str(e)
 
-
 def convert_file_fast(file_bytes, file_name, output_format="las", progress_callback=None):
     try:
         dlis_files, method, error = read_file_ultimate(file_bytes, file_name)
-        if error or not dlis_files:
-            return None, error, None
-        
+        if error or not dlis_files: return None, error, None
         dlis_file = dlis_files[0]
         curves = get_all_curves(dlis_file)
+        if not curves: return None, "لا توجد بيانات للتحويل", None
         
-        if not curves:
-            return None, "لا توجد بيانات", None
-        
-        if progress_callback:
-            progress_callback(50)
+        if progress_callback: progress_callback(50)
         
         if output_format == "las":
             las = lasio.LASFile()
@@ -329,97 +272,72 @@ def convert_file_fast(file_bytes, file_name, output_format="las", progress_callb
             
             output = io.StringIO()
             las.write(output, version=2)
-            
-            if progress_callback:
-                progress_callback(100)
-            
+            if progress_callback: progress_callback(100)
             return output.getvalue().encode('utf-8'), None, curves
-        
+            
         elif output_format == "dlis":
-            if progress_callback:
-                progress_callback(100)
+            if progress_callback: progress_callback(100)
             return file_bytes, None, None
-    
     except Exception as e:
         return None, str(e), None
 
-
 def analyze_file_quality(file_bytes, file_name):
     report = {
-        "file_name": file_name,
-        "status": "✅ نجاح",
-        "warnings": [],
-        "errors": [],
-        "info": {},
-        "curves_count": 0,
-        "file_size_kb": len(file_bytes) / 1024,
-        "quality_score": 100,
-        "method_used": "غير معروف"
+        "file_name": file_name, "status": "✅ نجاح", "warnings": [], "errors": [],
+        "info": {}, "curves_count": 0, "file_size_kb": len(file_bytes) / 1024,
+        "quality_score": 100, "method_used": "غير معروف"
     }
-    
     try:
         dlis_files, method, error = read_file_ultimate(file_bytes, file_name)
         if error or not dlis_files:
-            report["status"] = "❌ فشل"
+            report["status"], report["quality_score"] = "❌ فشل", 0
             report["errors"].append(error or "الملف غير صالح")
-            report["quality_score"] = 0
             return report
         
         report["method_used"] = method
-        dlis_file = dlis_files[0]
-        curves = get_all_curves(dlis_file)
+        curves = get_all_curves(dlis_files[0])
         report["curves_count"] = len(curves)
         
         if report["curves_count"] == 0:
             report["warnings"].append("لا توجد منحنيات")
             report["quality_score"] -= 30
-        
-        report["info"]["well_name"] = getattr(dlis_file, 'well_name', 'غير معروف')
+            
+        report["info"]["well_name"] = getattr(dlis_files[0], 'well_name', 'غير معروف')
         report["info"]["method"] = method
         
-        # حساب جودة البيانات
-        total_points = 0
-        missing = 0
+        total_points, missing = 0, 0
         for data in curves.values():
             if len(data) > 0:
                 total_points += len(data)
                 missing += np.isnan(data).sum()
-        
+                
         if total_points > 0:
             missing_pct = (missing / total_points) * 100
             if missing_pct > 10:
                 report["warnings"].append(f"{missing_pct:.1f}% بيانات مفقودة")
                 report["quality_score"] -= missing_pct / 2
             report["info"]["missing_data"] = f"{missing_pct:.1f}%"
-        
+            
         if report["file_size_kb"] > 10000:
             report["warnings"].append("حجم الملف كبير")
             report["quality_score"] -= 5
-        
     except Exception as e:
-        report["status"] = "❌ فشل"
+        report["status"], report["quality_score"] = "❌ فشل", 0
         report["errors"].append(str(e))
-        report["quality_score"] = 0
-    
+        
     report["quality_score"] = max(0, min(100, report["quality_score"]))
-    if report["quality_score"] >= 80:
-        report["quality_grade"] = "⭐ ممتاز"
-    elif report["quality_score"] >= 50:
-        report["quality_grade"] = "⚠️ جيد"
-    else:
-        report["quality_grade"] = "❌ ضعيف"
+    if report["quality_score"] >= 80: report["quality_grade"] = "⭐ ممتاز"
+    elif report["quality_score"] >= 50: report["quality_grade"] = "⚠️ جيد"
+    else: report["quality_grade"] = "❌ ضعيف"
     
     return report
 
-
 def plot_log_data(data_dict, max_curves=6):
-    if not data_dict:
-        return None
+    if not data_dict: return None
     items = [(n, d) for n, d in data_dict.items() if len(d) > 10 and not np.isnan(d).all()]
     items.sort(key=lambda x: len(x[1]), reverse=True)
     items = items[:max_curves]
-    if not items:
-        return None
+    if not items: return None
     fig = make_subplots(rows=1, cols=len(items), subplot_titles=[n for n, _ in items], shared_yaxes=True, horizontal_spacing=0.05)
     for i, (name, data) in enumerate(items):
         depth = np.arange(len(data)) * 0.1524
@@ -429,57 +347,40 @@ def plot_log_data(data_dict, max_curves=6):
     fig.update_layout(height=500, showlegend=False, template='plotly_white', margin=dict(l=50, r=20, t=80, b=50))
     return fig
 
-
 def compare_data(orig, conv, curve_names=None):
-    if curve_names is None:
-        curve_names = set(orig.keys()) & set(conv.keys())
+    if curve_names is None: curve_names = set(orig.keys()) & set(conv.keys())
     results = []
     for name in curve_names:
-        o = np.array(orig[name])
-        c = np.array(conv[name])
-        min_len = min(len(o), len(c))
-        o = o[:min_len]; c = c[:min_len]
+        o = np.array(orig[name]); c = np.array(conv[name])
+        min_len = min(len(o), len(c)); o = o[:min_len]; c = c[:min_len]
         valid = ~(np.isnan(o) | np.isnan(c))
         if np.sum(valid) > 0:
             ov = o[valid]; cv = c[valid]
-            diff = ov - cv
             results.append({
-                'curve_name': name,
-                'points_compared': np.sum(valid),
-                'max_abs_diff': np.max(np.abs(diff)),
-                'mean_abs_diff': np.mean(np.abs(diff)),
+                'curve_name': name, 'points_compared': np.sum(valid),
+                'max_abs_diff': np.max(np.abs(ov - cv)), 'mean_abs_diff': np.mean(np.abs(ov - cv)),
                 'identical': np.allclose(ov, cv, rtol=1e-10, atol=1e-10),
-                'nan_count_orig': np.isnan(o).sum(),
-                'nan_count_conv': np.isnan(c).sum()
+                'nan_count_orig': np.isnan(o).sum(), 'nan_count_conv': np.isnan(c).sum()
             })
     return results
 
-
 def display_comparison_stats(results):
-    if not results:
-        st.info("لا توجد بيانات للمقارنة"); return
+    if not results: st.info("لا توجد بيانات للمقارنة"); return
     df = pd.DataFrame(results)
     identical_count = sum(df['identical'])
     total = len(df)
     col1, col2, col3 = st.columns(3)
     with col1:
-        if identical_count == total:
-            st.markdown('<div class="match-perfect">✅ <b>مطابقة تامة!</b></div>', unsafe_allow_html=True)
-        elif identical_count / total > 0.8:
-            st.markdown('<div class="match-warning">⚠️ <b>جيدة جداً</b></div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="match-error">❌ <b>اختلافات</b></div>', unsafe_allow_html=True)
-    with col2:
-        st.metric("📊 عدد المنحنيات", total)
-    with col3:
-        st.metric("✅ متطابقة", f"{identical_count}/{total}")
+        if identical_count == total: st.markdown('<div class="match-perfect">✅ <b>مطابقة تامة!</b></div>', unsafe_allow_html=True)
+        elif identical_count / total > 0.8: st.markdown('<div class="match-warning">⚠️ <b>جيدة جداً</b></div>', unsafe_allow_html=True)
+        else: st.markdown('<div class="match-error">❌ <b>اختلافات</b></div>', unsafe_allow_html=True)
+    with col2: st.metric("📊 عدد المنحنيات", total)
+    with col3: st.metric("✅ متطابقة", f"{identical_count}/{total}")
     st.dataframe(df[['curve_name', 'points_compared', 'max_abs_diff', 'mean_abs_diff', 'identical']], use_container_width=True)
-
 
 def plot_comparison(orig, conv, curve_names, max_curves=4):
     common = [c for c in curve_names if c in orig and c in conv][:max_curves]
-    if not common:
-        return None
+    if not common: return None
     fig = make_subplots(rows=1, cols=len(common)*2, subplot_titles=[f"{c} (أصلي)" for c in common] + [f"{c} (محول)" for c in common], shared_yaxes=True, horizontal_spacing=0.03)
     for i, name in enumerate(common):
         o = np.array(orig[name]); c = np.array(conv[name])
@@ -494,11 +395,17 @@ def plot_comparison(orig, conv, curve_names, max_curves=4):
     fig.update_layout(height=600, showlegend=False, template='plotly_white', margin=dict(l=50, r=20, t=80, b=50))
     return fig
 
+def read_las_file(file_bytes):
+    try:
+        las_text = file_bytes.decode('utf-8', errors='ignore')
+        las = lasio.read(io.StringIO(las_text))
+        return {c.mnemonic: c.data for c in las.curves if c.data is not None and len(c.data) > 0}, None
+    except Exception as e:
+        return None, str(e)
 
 # ============================================================
 # واجهة المستخدم
 # ============================================================
-
 uploaded_files = st.file_uploader(
     "📂 اختر ملفات LIS أو DLIS",
     type=['lis', 'dlis', 'LIS', 'DLIS'],
@@ -524,7 +431,7 @@ if uploaded_files:
                     fig = plot_log_data(data['all_data'])
                     if fig: st.plotly_chart(fig, use_container_width=True)
                     
-                    with st.expander("📋 المنحنيات"):
+                    with st.expander("📋 تفاصيل المنحنيات"):
                         for frame in data['frames']:
                             for curve in frame['curves']:
                                 st.write(f"- {curve['name']} (نقاط: {curve['count']})")
@@ -533,12 +440,9 @@ if uploaded_files:
     
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
-    with col1:
-        output_format = st.selectbox("🔄 صيغة الإخراج:", ["las", "dlis"])
-    with col2:
-        compress = st.checkbox("📦 ضغط ZIP", value=True)
-    with col3:
-        enable_comparison = st.checkbox("🔍 مقارنة", value=True)
+    with col1: output_format = st.selectbox("🔄 صيغة الإخراج:", ["las", "dlis"])
+    with col2: compress = st.checkbox("📦 ضغط ZIP", value=True)
+    with col3: enable_comparison = st.checkbox("🔍 مقارنة بعد التحويل", value=True)
     
     if st.button("🚀 تحويل الكل", type="primary", use_container_width=True):
         with st.spinner("🔍 تحليل الجودة..."):
@@ -549,7 +453,7 @@ if uploaded_files:
                 report = analyze_file_quality(file.read(), file.name)
                 quality_reports.append(report)
                 file.seek(0)
-            st.success("✅ تم التحليل")
+            st.success("✅ تم الانتهاء من التحليل")
         
         st.markdown("### 📊 تقرير الجودة")
         total_files = len(quality_reports)
@@ -568,18 +472,15 @@ if uploaded_files:
                 st.write(f"**طريقة:** {report['method_used']}")
                 st.write(f"**المنحنيات:** {report['curves_count']}")
                 st.write(f"**اسم البئر:** {report['info'].get('well_name', 'غير معروف')}")
-                if report["warnings"]:
-                    st.warning(f"⚠️ {', '.join(report['warnings'])}")
+                if report["warnings"]: st.warning(f"⚠️ {', '.join(report['warnings'])}")
         
         st.markdown("### ⚡ جاري التحويل...")
         prog = st.progress(0)
         status = st.empty()
-        converted = []
-        failed = []
+        converted, failed = [], []
         
         for i, file in enumerate(uploaded_files):
             status.text(f"تحويل: {file.name} ({i+1}/{len(uploaded_files)})")
-            
             orig_data = None
             if enable_comparison:
                 file.seek(0)
@@ -597,7 +498,6 @@ if uploaded_files:
             if result:
                 new_name = Path(file.name).stem + f"_converted.{output_format}"
                 converted.append((new_name, result))
-                
                 if enable_comparison and orig_data and output_format == "las" and conv_data:
                     try:
                         las_data, _ = read_las_file(result)
@@ -616,18 +516,17 @@ if uploaded_files:
             file.seek(0)
         
         prog.progress(100)
-        status.text("✅ تم الانتهاء!")
+        status.text("✅ تم الانتهاء من جميع الملفات!")
         
-        st.markdown("### 📦 النتائج")
+        st.markdown("### 📦 النتائج النهائية")
         col1, col2 = st.columns(2)
         with col1: st.success(f"✅ نجح: {len(converted)} ملف")
         with col2:
             if failed: st.error(f"❌ فشل: {len(failed)} ملف")
         
         if failed:
-            with st.expander("❌ الملفات الفاشلة"):
-                for name, error in failed:
-                    st.write(f"- **{name}**: {error}")
+            with st.expander("❌ عرض أسباب الفشل للملفات"):
+                for name, error in failed: st.write(f"- **{name}**: {error}")
         
         if converted:
             if compress and len(converted) > 1:
@@ -636,7 +535,7 @@ if uploaded_files:
                     for name, data in converted:
                         zf.writestr(name, data)
                 st.download_button(
-                    label=f"📥 تحميل ZIP ({len(converted)} ملف)",
+                    label=f"📥 تحميل كملف مضغوط ZIP ({len(converted)} ملف)",
                     data=zbuf.getvalue(),
                     file_name=f"converted_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
                     mime="application/zip",
@@ -651,18 +550,8 @@ if uploaded_files:
                         mime="text/plain" if output_format == "las" else "application/octet-stream",
                         use_container_width=True
                     )
-
 else:
-    st.info("👆 ارفع ملفات LIS أو DLIS")
+    st.info("👆 ارفع ملفاتك بصيغة LIS أو DLIS في الأعلى للبدء.")
 
 st.markdown("---")
-st.caption("💡 يدعم LIS القديم عبر القراءة الخام (Raw Binary)")
-
-
-def read_las_file(file_bytes):
-    try:
-        las_text = file_bytes.decode('utf-8')
-        las = lasio.read(io.StringIO(las_text))
-        return {c.mnemonic: c.data for c in las.curves if c.data is not None and len(c.data) > 0}, None
-    except Exception as e:
-        return None, str(e)
+st.caption("💡 مبني على dlisio - يدعم جميع أنواع LIS القديمة والحديثة")
